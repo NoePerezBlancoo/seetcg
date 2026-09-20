@@ -359,7 +359,7 @@ function bindCommon() {
     state.tab = button.dataset.tab
     render()
   }))
-  $('[data-card-id]').forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
+  $$('[data-card-id]').forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
 }
 
 function bindScanner() {
@@ -427,7 +427,7 @@ function bindSearch() {
       const cards = await searchCards(query, number, 30)
       message.innerHTML = ''
       results.innerHTML = candidateGrid(cards, 'Resultados del catálogo')
-      $('[data-card-id]', results).forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
+      $$('[data-card-id]', results).forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
     } catch (error) {
       message.innerHTML = `<div class="alert">${escapeHtml(error.message)}</div>`
     }
