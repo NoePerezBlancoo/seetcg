@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "start": "serve -s . -l $PORT",
     "check": "node --check app.js"
+  },
+  "dependencies": {
+    "serve": "^14.2.4"
   }
 }
