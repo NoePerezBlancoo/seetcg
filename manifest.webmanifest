@@ -1,0 +1,10 @@
+{
+  "name": "SeeTCG",
+  "short_name": "SeeTCG",
+  "description": "Escanea cartas TCG, identifícalas y consulta su valor de mercado.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#080b10",
+  "theme_color": "#080b10",
+  "icons": [{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}
