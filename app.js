@@ -4,7 +4,8 @@ const FX_KEY = 'seetcg:fx:v1'
 
 const state = {
   tab: 'scan',
-  lang: 'es',
+  lang: 'auto',
+  detectedLang: 'es',
   file: null,
   preview: '',
   ocrText: '',
@@ -65,17 +66,21 @@ async function json(url) {
   return response.json()
 }
 
-async function searchCards(query = '', number = '', limit = 30) {
+function activeCatalogLang() {
+  return state.lang === 'auto' ? (state.detectedLang || 'es') : state.lang
+}
+
+async function searchCards(query = '', number = '', limit = 30, lang = activeCatalogLang()) {
   const params = new URLSearchParams()
   if (query.trim()) params.set('name', query.trim())
   if (number.trim()) params.set('localId', `eq:${number.trim()}`)
   params.set('pagination:page', '1')
   params.set('pagination:itemsPerPage', String(limit))
-  return json(`${TCGDEX}/${state.lang}/cards?${params}`)
+  return json(`${TCGDEX}/${lang}/cards?${params}`)
 }
 
-async function getCard(id) {
-  return json(`${TCGDEX}/${state.lang}/cards/${encodeURIComponent(id)}`)
+async function getCard(id, lang = activeCatalogLang()) {
+  return json(`${TCGDEX}/${lang}/cards/${encodeURIComponent(id)}`)
 }
 
 const STOP = new Set([
@@ -84,15 +89,25 @@ const STOP = new Set([
   'retirada','entrenador','energía','energia','habilidad','regla','basico','básico',
 ])
 
+function detectOcrLanguage(text) {
+  if (/[\u3040-\u30ff\u3400-\u9fff]/u.test(text)) return 'ja'
+  return 'es'
+}
+
 function ocrTokens(text) {
-  return [...new Set(
-    text.toLowerCase()
-      .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-      .replace(/[^a-z0-9\s-]/gi, ' ')
-      .split(/\s+/)
-      .filter((word) => word.length >= 4 && word.length <= 18)
-      .filter((word) => !STOP.has(word) && !/^\d+$/.test(word)),
-  )].slice(0, 6)
+  const latin = text.toLowerCase()
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z0-9\s-]/gi, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && word.length <= 18)
+    .filter((word) => !STOP.has(word) && !/^\d+$/.test(word))
+
+  const japanese = text
+    .split(/\r?\n/)
+    .flatMap((line) => line.match(/[\u3040-\u30ff\u3400-\u9fffー]{2,12}/gu) || [])
+    .filter((word) => word.length >= 2 && word.length <= 12)
+
+  return [...new Set([...japanese, ...latin])].slice(0, 10)
 }
 
 function cardNumber(text) {
@@ -114,23 +129,41 @@ function candidateScore(card, text, tokens, number) {
 async function candidatesFromOcr(text) {
   const number = cardNumber(text)
   const tokens = ocrTokens(text)
+  const detected = detectOcrLanguage(text)
+  state.detectedLang = detected
+  const languages = state.lang === 'auto'
+    ? (detected === 'ja' ? ['ja'] : ['es', 'en'])
+    : [state.lang]
   const bucket = new Map()
 
-  if (number) {
-    try {
-      ;(await searchCards('', number, 100)).forEach((card) => bucket.set(card.id, card))
-    } catch {}
+  for (const lang of languages) {
+    if (number) {
+      try {
+        ;(await searchCards('', number, 100, lang)).forEach((card) => {
+          bucket.set(`${lang}:${card.id}`, { ...card, _lang: lang })
+        })
+      } catch {}
+    }
+
+    const groups = await Promise.all(tokens.slice(0, 6).map(async (token) => {
+      try {
+        return (await searchCards(token, '', 40, lang)).map((card) => ({ ...card, _lang: lang }))
+      } catch {
+        return []
+      }
+    }))
+    groups.flat().forEach((card) => bucket.set(`${lang}:${card.id}`, card))
   }
 
-  const groups = await Promise.all(tokens.slice(0, 4).map(async (token) => {
-    try { return await searchCards(token, '', 40) } catch { return [] }
-  }))
-  groups.flat().forEach((card) => bucket.set(card.id, card))
-
-  return [...bucket.values()]
+  const scored = [...bucket.values()]
     .map((card) => ({ ...card, _score: candidateScore(card, text, tokens, number) }))
     .sort((a, b) => b._score - a._score)
-    .slice(0, 18)
+
+  const best = scored[0]?._score || 0
+  if (best < 4) return []
+  return scored
+    .filter((card) => card._score >= Math.max(4, best - 6))
+    .slice(0, 12)
 }
 
 async function usdEur() {
@@ -238,7 +271,7 @@ function candidateGrid(cards, title = 'Posibles coincidencias') {
   return `<section class="candidate-section">
     <div class="section-heading"><div><span class="eyebrow">IDENTIFICACIÓN</span><h2>${escapeHtml(title)}</h2></div><span class="muted">${cards.length} resultados</span></div>
     <div class="candidate-grid">${cards.map((card) => `
-      <button class="candidate-card" data-card-id="${escapeHtml(card.id)}">
+      <button class="candidate-card" data-card-id="${escapeHtml(card.id)}" data-card-lang="${escapeHtml(card._lang || activeCatalogLang())}">
         <img src="${escapeHtml(cardImage(card.image, 'low'))}" alt="${escapeHtml(card.name)}" loading="lazy">
         <span><strong>${escapeHtml(card.name)}</strong><small>#${escapeHtml(card.localId)}</small></span>
       </button>`).join('')}</div>
@@ -256,7 +289,7 @@ function scanView() {
       </div>
       <div class="scanner-card">
         <div class="scanner-top"><div><strong>Cámara / imagen</strong><small>Carta recta, sin reflejos y ocupando el encuadre</small></div>
-          <select id="scan-lang"><option value="es" ${state.lang === 'es' ? 'selected' : ''}>ES</option><option value="en" ${state.lang === 'en' ? 'selected' : ''}>EN</option></select>
+          <select id="scan-lang"><option value="auto" ${state.lang === 'auto' ? 'selected' : ''}>AUTO</option><option value="es" ${state.lang === 'es' ? 'selected' : ''}>ES</option><option value="en" ${state.lang === 'en' ? 'selected' : ''}>EN</option><option value="ja" ${state.lang === 'ja' ? 'selected' : ''}>日本語</option></select>
         </div>
         <button class="dropzone" id="pick-image">${state.preview
           ? `<img src="${escapeHtml(state.preview)}" alt="Carta seleccionada">`
@@ -279,7 +312,7 @@ function searchView() {
       <form class="search-form" id="search-form">
         <label><span>Nombre</span><input id="query" placeholder="Ej. Charizard, Pikachu…"></label>
         <label><span>Número</span><input id="number" placeholder="199"></label>
-        <label><span>Idioma</span><select id="search-lang"><option value="es" ${state.lang === 'es' ? 'selected' : ''}>ES</option><option value="en" ${state.lang === 'en' ? 'selected' : ''}>EN</option></select></label>
+        <label><span>Idioma</span><select id="search-lang"><option value="es" ${state.lang === 'es' || state.lang === 'auto' ? 'selected' : ''}>ES</option><option value="en" ${state.lang === 'en' ? 'selected' : ''}>EN</option><option value="ja" ${state.lang === 'ja' ? 'selected' : ''}>日本語</option></select></label>
         <button class="primary-button compact">Buscar</button>
       </form>
       <div id="search-message"></div>
@@ -326,7 +359,7 @@ function bindCommon() {
     state.tab = button.dataset.tab
     render()
   }))
-  $$('[data-card-id]').forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId)))
+  $('[data-card-id]').forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
 }
 
 function bindScanner() {
@@ -363,7 +396,8 @@ async function runScan() {
 
   try {
     progress('Preparando OCR…', .04)
-    const result = await window.Tesseract.recognize(state.file, 'spa+eng', {
+    const ocrLang = state.lang === 'ja' ? 'jpn+eng' : state.lang === 'en' ? 'eng' : state.lang === 'es' ? 'spa+eng' : 'jpn+spa+eng'
+    const result = await window.Tesseract.recognize(state.file, ocrLang, {
       logger: (message) => {
         if (message.status === 'recognizing text') progress('Leyendo la carta…', message.progress || .1)
       },
@@ -393,17 +427,18 @@ function bindSearch() {
       const cards = await searchCards(query, number, 30)
       message.innerHTML = ''
       results.innerHTML = candidateGrid(cards, 'Resultados del catálogo')
-      $$('[data-card-id]', results).forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId)))
+      $('[data-card-id]', results).forEach((button) => button.addEventListener('click', () => openCard(button.dataset.cardId, button.dataset.cardLang)))
     } catch (error) {
       message.innerHTML = `<div class="alert">${escapeHtml(error.message)}</div>`
     }
   })
 }
 
-async function openCard(id) {
+async function openCard(id, lang = activeCatalogLang()) {
   showBusy(true)
   try {
-    state.selected = await getCard(id)
+    state.detectedLang = lang || state.detectedLang
+    state.selected = await getCard(id, lang)
     state.selectedVariant = variants(state.selected)[0][0]
     render()
   } catch {
